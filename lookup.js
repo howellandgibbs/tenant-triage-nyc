@@ -18,6 +18,8 @@
 //   3. <script type="module" src="../lookup.js"></script>
 //   4. Call: initLookup({ filterKeywords: ['mold', 'mildew', ...] })
 //      from a <script type="module"> so it runs after this module loads.
+//      Pass shareableUrl: true to keep the selected address in ?q= so the
+//      results can be shared (the building lookup page only).
 // ============================================
 
 import {
@@ -35,6 +37,7 @@ const INITIAL_VIOLATIONS_DISPLAY = 10;
 const VIOLATIONS_PER_PAGE = 20;
 const SOCRATA_FETCH_LIMIT = 1000;
 const DEBOUNCE_MS = 250;
+const SHARE_PARAM = 'q';
 
 // State
 let lookupHighlightedIndex = -1;
@@ -46,6 +49,7 @@ let displayedCount = 0;
 let filterKeywords = [];
 let filterActive = true;
 let currentBuilding = null;
+let shareableUrl = false;
 
 // DOM references (set in init)
 let lookupInput, lookupSuggestionsBox, lookupStatusEl, lookupResultsEl, lookupFallbackEl, lookupAnnounceEl;
@@ -55,6 +59,7 @@ let lookupInput, lookupSuggestionsBox, lookupStatusEl, lookupResultsEl, lookupFa
 // ============================================
 function initLookup(options) {
   filterKeywords = (options && options.filterKeywords) || [];
+  shareableUrl = !!(options && options.shareableUrl);
 
   lookupInput = document.getElementById('lookup-input');
   lookupSuggestionsBox = document.getElementById('lookup-suggestions');
@@ -91,6 +96,8 @@ function initLookup(options) {
     lookupStatusEl.textContent = '';
     lookupStatusEl.classList.remove('error');
     lookupFallbackEl.style.display = 'none';
+    // The results are gone, so a link to them would be stale
+    setShareQuery(null);
 
     if (query.length < 3) {
       closeLookupSuggestions();
@@ -140,6 +147,64 @@ function initLookup(options) {
       closeLookupSuggestions();
     }
   });
+
+  restoreSharedLookup();
+}
+
+// ============================================
+// SHAREABLE URL
+// The address lives in ?q= as plain text rather than as a BBL, so the link
+// reads like what was searched. Opening it runs the same search again and
+// loads the building that matches.
+// ============================================
+function setShareQuery(query) {
+  if (!shareableUrl) return;
+  var url = new URL(window.location.href);
+  if (query) {
+    url.searchParams.set(SHARE_PARAM, query);
+    // Commas are legal in a query string; keep them readable when pasted
+    url.search = url.search.replace(/%2C/gi, ',');
+  } else if (url.searchParams.has(SHARE_PARAM)) {
+    url.searchParams.delete(SHARE_PARAM);
+  } else {
+    return;
+  }
+  history.replaceState(history.state, '', url);
+}
+
+function restoreSharedLookup() {
+  if (!shareableUrl) return;
+  var query = (new URL(window.location.href).searchParams.get(SHARE_PARAM) || '').trim();
+  if (query.length < 3) return;
+
+  lookupInput.value = query;
+  lookupStatusEl.textContent = 'Looking up violations…';
+
+  searchAddresses(query, {
+    maxSuggestions: MAX_SUGGESTIONS,
+    appToken: SOCRATA_APP_TOKEN || undefined,
+  })
+    .then(function(buildings) {
+      if (!buildings || buildings.length === 0) {
+        lookupStatusEl.textContent = 'We could not find that address. Try searching for it again.';
+        lookupStatusEl.classList.add('error');
+        return;
+      }
+      // Prefer an exact label match, in case the search ranks a neighbor first
+      var wanted = query.toLowerCase();
+      var building = buildings.find(function(b) {
+        return (b.displayLabel || '').toLowerCase() === wanted ||
+          (b.label || '').toLowerCase() === wanted;
+      }) || buildings[0];
+      lookupInput.value = building.label;
+      setShareQuery(building.displayLabel);
+      fetchViolations(building);
+    })
+    .catch(function() {
+      lookupStatusEl.textContent = 'Address lookup service is temporarily unavailable.';
+      lookupStatusEl.classList.add('error');
+      lookupFallbackEl.style.display = 'block';
+    });
 }
 
 // ============================================
@@ -225,6 +290,7 @@ function selectLookupSuggestion(index) {
   var selected = lookupCurrentSuggestions[index];
   lookupInput.value = selected.label;
   closeLookupSuggestions();
+  setShareQuery(selected.displayLabel);
   fetchViolations(selected);
 }
 
